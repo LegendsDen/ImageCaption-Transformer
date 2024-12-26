@@ -40,33 +40,28 @@ print_freq = 100  # print training/validation stats every __ batches
 fine_tune_encoder = True  # fine-tune encoder?
 checkpoint = None  # path to checkpoint, None if none
 
-def beam_search_decode(decoder, beam_size, imgs, word_map,  max_len, device):
+def beam_search_decode(decoder, beam_size, imgs, word_map,  max_len, device,alpha=0.7):
     sos_idx = word_map['<start>']
     eos_idx = word_map['<end>']
-
     # Precompute the encoder output and reuse it for every step
     encoder_output =decoder.encode(imgs)
     # Initialize the decoder input with the sos token
     decoder_initial_input = torch.empty(1, 1).fill_(sos_idx).type_as(imgs).to(device)
-
-    # Create a candidate list
-    candidates = [(decoder_initial_input, 1)]
-
+    # Create a candidate list    sequence, score, length
+    candidates = [(decoder_initial_input, 0,1)]
     while True:
-
         # If a candidate has reached the maximum length, it means we have run the decoding for at least max_len iterations, so stop the search
-        if any([cand.size(1) == max_len for cand, _ in candidates]):
+        if any([cand.size(1) == max_len for cand, _,_ in candidates]):
             break
-
         # Create a new list of candidates
         new_candidates = []
 
-        for candidate, score in candidates:
+        for candidate, score,length in candidates:
 
             # Do not expand candidates that have reached the eos token
             if candidate[0][-1].item() == eos_idx:
+                new_candidates.append((candidate, score, length))
                 continue
-
             # Build the candidate's mask
             candidate_mask = causal_mask(candidate.size(1)).to(device)
             # calculate output
@@ -82,17 +77,22 @@ def beam_search_decode(decoder, beam_size, imgs, word_map,  max_len, device):
                 # create a new candidate by appending the token to the current candidate
                 new_candidate = torch.cat([candidate, token], dim=1)
                 # We sum the log probabilities because the probabilities are in log space
-                new_candidates.append((new_candidate, score + token_prob))
+                new_score = score + token_prob
+                new_candidates.append((new_candidate, new_score, length + 1))
 
+        # Apply length normalization to scores
+        new_candidates = [
+            (seq, score / (length ** alpha), length)  # Normalize score
+            for seq, score, length in new_candidates
+        ]
         # Sort the new candidates by their score
         candidates = sorted(new_candidates, key=lambda x: x[1], reverse=True)
         # Keep only the top k candidates
         candidates = candidates[:beam_size]
 
         # If all the candidates have reached the eos token, stop
-        if all([cand[0][-1].item() == eos_idx for cand, _ in candidates]):
+        if all([cand[0][-1].item() == eos_idx for cand, _,_ in candidates]):
             break
-
     # Return the best candidate
     return candidates[0][0].squeeze()
 
